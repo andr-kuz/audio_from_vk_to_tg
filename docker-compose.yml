@@ -1,0 +1,27 @@
+version: '3.8'
+
+volumes:
+  server-data: 
+    driver: local
+
+services:
+  tg-bot:
+    build: .
+    env_file: ./vars.env
+    command: python3 /home/tg-bot/main.py
+    depends_on:
+      - tg-api
+  tg-api:
+    image: ghcr.io/bots-house/docker-telegram-bot-api:latest
+    env_file: ./vars.env
+    command: 
+      # set working directory for files 
+      - --dir=/var/lib/telegram-bot-api
+      # enable logging, disable in production
+      - --verbosity=2
+    volumes: 
+      # mount volume for persistance of files
+      - server-data:/var/lib/telegram-bot-api
+    ports:
+      # access the API on 8081 port
+      - 8081:8081

@@ -1,0 +1,6 @@
+*.binlog
+__pycache__/
+*.py[cod]
+*$py.class
+vk_config.v2.json
+temp.ts.mp3
