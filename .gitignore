@@ -1,3 +1,4 @@
+vars.env
 *.binlog
 __pycache__/
 *.py[cod]
