@@ -6,7 +6,7 @@ https://github.com/gpubiceps/vk_audio_downloader
 import os
 import time
 from asyncio.exceptions import TimeoutError as AioTimeoutError
-from asyncio import Semaphore, run
+from asyncio import Semaphore, run, gather, wait_for
 from aiohttp.client import ClientSession
 from aiohttp.client_exceptions import ContentTypeError, ClientConnectorError
 import m3u8
@@ -22,7 +22,6 @@ class MusicDownloader:
         self._vk_audio = vk_audio
         self.save_dir = save_dir
         self.temp_file_path = f"{self.save_dir}/{TEMP_AUDIO_FILE_NAME}"
-        self.semaphore = Semaphore(MAX_TASKS)
 
     def get_audio_by_id(self, owner_id: int, audio_id: int, verbose: bool = True) -> str:
         """Скачивает аудио по id трека
@@ -41,9 +40,9 @@ class MusicDownloader:
         m3u8_data = self._get_m3u8_by_id(owner_id, audio_id)
         if not m3u8_data:
             return None
-        m3u8_data, m3u8_url, meta_info = m3u8_data
+        m3u8_data, self.m3u8_url, meta_info = m3u8_data
         parsed_m3u8 = self._parse_m3u8(m3u8_data)
-        segments_binary_data = run(self._get_audio_from_m3u8(parsed_m3u8=parsed_m3u8, m3u8_url=m3u8_url))
+        segments_binary_data = run(self._get_audio_from_m3u8(parsed_m3u8=parsed_m3u8))
 
         audio_name = f"{meta_info['artist']} - {meta_info['title']}"
 
@@ -96,31 +95,34 @@ class MusicDownloader:
             parsed_data.append(temp)
         return parsed_data
 
-    async def _get_audio_from_m3u8(self, parsed_m3u8: list, m3u8_url: str) -> bytes:
+    async def _get_audio_from_m3u8(self, parsed_m3u8: list) -> bytes:
         """Асинхронно скачивает сегменты и собирает их в одну байт-строку"""
-        downloaded_chunks = [None] * len(parsed_m3u8) # to keep chunks in order
-        progress_line_shorter_multiplier = 3
-        whole_progress_line = ' ' * round(100 / progress_line_shorter_multiplier)
-        async with ClientSession() as session:
-            for index, segment in enumerate(parsed_m3u8):
-                downloaded_chunks[index] = await self._handle_segment(m3u8_url, segment, session)
-                downloading_progress = sum(x is not None for x in downloaded_chunks)
-                downloading_progress_percent = round(downloading_progress / len(downloaded_chunks) * 100)
-                block_spaces_counter = round(downloading_progress_percent / progress_line_shorter_multiplier)
-                progress_line = whole_progress_line.replace(' ' * block_spaces_counter, '█' * block_spaces_counter, 1)
-                print(f'Downloading chunks: {downloading_progress_percent}%|{progress_line}|{downloading_progress}/{len(downloaded_chunks)}',  end="\r")
+        self.left = self.whole = len(parsed_m3u8)
+        tasks = []
+        for segment in parsed_m3u8:
+            tasks.append(
+                    wait_for(
+                            self._handle_segment(segment),
+                            timeout=None
+                        )
+                    )
+        downloaded_chunks = await gather(*tasks)
         return b''.join(downloaded_chunks)
 
-    async def _handle_segment(self, m3u8_url: str, segment: dict, session: ClientSession) -> bytes:
-        segment_uri = m3u8_url.replace("index.m3u8", segment["name"])
-        content = await self._download_chunk(segment_uri, session)
-        if segment["key_uri"] is not None:
-            key = await self._download_chunk(segment["key_uri"], session)
-            content = await self._decode_aes_128(data=content, key=key)
-        return content
+    async def _handle_segment(self, segment: dict) -> bytes:
+        async with Semaphore(MAX_TASKS) as semaphore:
+            segment_uri = self.m3u8_url.replace("index.m3u8", segment["name"])
+            content = await self._download_chunk(segment_uri)
+            if segment["key_uri"] is not None:
+                key = await self._download_chunk(segment["key_uri"])
+                content = await self._decode_aes_128(data=content, key=key)
+            self.left -= 1
+            progress = self.whole - self.left
+            print(f'Прогресс: [{progress}/{self.whole}]', end='\r')
+            return content
 
-    async def _download_chunk(self, url: str, session: ClientSession) -> bytes:
-        async with self.semaphore:
+    async def _download_chunk(self, url: str) -> bytes:
+        async with ClientSession() as session:
             while True:
                 try:
                     res = await session.get(url, timeout=5)
